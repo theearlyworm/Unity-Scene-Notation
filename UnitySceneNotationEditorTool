@@ -1,0 +1,455 @@
+using UnityEngine;
+using UnityEditor;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+
+/// <summary>
+/// Unity Editor tool to build scene hierarchies from custom text notation
+/// Usage: Tools > Scene Notation Builder
+/// </summary>
+public class SceneNotationBuilder : EditorWindow
+{
+private string notationText = “”;
+private Vector2 scrollPos;
+private bool showHelp = false;
+
+```
+[MenuItem("Tools/Scene Notation Builder")]
+public static void ShowWindow()
+{
+    GetWindow<SceneNotationBuilder>("Scene Notation Builder");
+}
+
+void OnGUI()
+{
+    GUILayout.Label("Scene Notation Builder", EditorStyles.boldLabel);
+    
+    if (GUILayout.Button(showHelp ? "Hide Help" : "Show Help"))
+    {
+        showHelp = !showHelp;
+    }
+
+    if (showHelp)
+    {
+        EditorGUILayout.HelpBox(
+            "Notation Guide:\n" +
+            ":: {{ GameObject }} - Create/find GameObject\n" +
+            "^:: *ComponentName* - Add component\n" +
+            "^:: <<AssetName>> - Asset reference (noted but not assigned)\n" +
+            "+ (( ComponentName )) - Add component\n" +
+            "^||___ Name - Reference (noted)\n\n" +
+            "Indentation shows hierarchy. Duplicates are merged.",
+            MessageType.Info);
+    }
+
+    GUILayout.Space(10);
+    GUILayout.Label("Paste your notation below:", EditorStyles.label);
+    
+    scrollPos = EditorGUILayout.BeginScrollView(scrollPos, GUILayout.Height(300));
+    notationText = EditorGUILayout.TextArea(notationText, GUILayout.ExpandHeight(true));
+    EditorGUILayout.EndScrollView();
+
+    GUILayout.Space(10);
+
+    if (GUILayout.Button("Build Scene", GUILayout.Height(30)))
+    {
+        BuildSceneFromNotation();
+    }
+
+    if (GUILayout.Button("Clear Text"))
+    {
+        notationText = "";
+    }
+}
+
+void BuildSceneFromNotation()
+{
+    if (string.IsNullOrWhiteSpace(notationText))
+    {
+        EditorUtility.DisplayDialog("Error", "Please enter notation text first!", "OK");
+        return;
+    }
+
+    try
+    {
+        var parser = new NotationParser();
+        var nodes = parser.Parse(notationText);
+        
+        var builder = new SceneBuilder();
+        builder.BuildScene(nodes);
+        
+        EditorUtility.DisplayDialog("Success", 
+            $"Scene built successfully!\n{builder.GetStats()}", "OK");
+    }
+    catch (Exception e)
+    {
+        EditorUtility.DisplayDialog("Error", $"Failed to build scene:\n{e.Message}", "OK");
+        Debug.LogError($"Scene Notation Builder Error: {e}");
+    }
+}
+```
+
+}
+
+// ============================================================================
+// PARSER - Reads notation and creates data structure
+// ============================================================================
+
+public class NotationParser
+{
+private class LineInfo
+{
+public string rawLine;
+public int indentLevel;
+public string content;
+public NodeType type;
+public string name;
+}
+
+```
+public enum NodeType
+{
+    GameObject,
+    Component,
+    Asset,
+    Reference,
+    Unknown
+}
+
+public class SceneNode
+{
+    public NodeType type;
+    public string name;
+    public int indentLevel;
+    public List<SceneNode> children = new List<SceneNode>();
+    public SceneNode parent;
+}
+
+public List<SceneNode> Parse(string notation)
+{
+    var lines = notation.Split('\n');
+    var lineInfos = new List<LineInfo>();
+
+    // First pass: parse each line
+    foreach (var line in lines)
+    {
+        if (string.IsNullOrWhiteSpace(line)) continue;
+
+        var info = ParseLine(line);
+        if (info != null && info.type != NodeType.Unknown)
+        {
+            lineInfos.Add(info);
+        }
+    }
+
+    // Second pass: build hierarchy
+    return BuildHierarchy(lineInfos);
+}
+
+private LineInfo ParseLine(string line)
+{
+    var info = new LineInfo { rawLine = line };
+    
+    // Calculate indent level (groups of 4 spaces or 1 tab = 1 level)
+    int spaces = 0;
+    foreach (char c in line)
+    {
+        if (c == ' ') spaces++;
+        else if (c == '\t') spaces += 4;
+        else break;
+    }
+    info.indentLevel = spaces / 4;
+
+    // Get content without leading whitespace
+    info.content = line.TrimStart();
+
+    // Determine type and extract name
+    if (info.content.Contains("{{ ") && info.content.Contains(" }}"))
+    {
+        info.type = NodeType.GameObject;
+        info.name = ExtractBetween(info.content, "{{ ", " }}");
+    }
+    else if (info.content.Contains("[[ ") && info.content.Contains(" ]]"))
+    {
+        info.type = NodeType.GameObject;
+        info.name = ExtractBetween(info.content, "[[ ", " ]]");
+    }
+    else if (info.content.Contains("*") && info.content.Split('*').Length >= 3)
+    {
+        info.type = NodeType.Component;
+        info.name = ExtractBetween(info.content, "*", "*");
+    }
+    else if (info.content.Contains("(( ") && info.content.Contains(" ))"))
+    {
+        info.type = NodeType.Component;
+        info.name = ExtractBetween(info.content, "(( ", " ))");
+    }
+    else if (info.content.Contains("<<") && info.content.Contains(">>"))
+    {
+        info.type = NodeType.Asset;
+        info.name = ExtractBetween(info.content, "<<", ">>");
+    }
+    else if (info.content.Contains("^||"))
+    {
+        info.type = NodeType.Reference;
+        info.name = info.content.Substring(info.content.IndexOf("^||") + 3).Trim();
+    }
+    else
+    {
+        info.type = NodeType.Unknown;
+    }
+
+    return info;
+}
+
+private string ExtractBetween(string source, string start, string end)
+{
+    int startIdx = source.IndexOf(start);
+    if (startIdx == -1) return "";
+    
+    startIdx += start.Length;
+    int endIdx = source.IndexOf(end, startIdx);
+    if (endIdx == -1) return "";
+
+    return source.Substring(startIdx, endIdx - startIdx).Trim();
+}
+
+private List<SceneNode> BuildHierarchy(List<LineInfo> lines)
+{
+    var roots = new List<SceneNode>();
+    var stack = new Stack<SceneNode>();
+
+    foreach (var line in lines)
+    {
+        var node = new SceneNode
+        {
+            type = line.type,
+            name = line.name,
+            indentLevel = line.indentLevel
+        };
+
+        // Pop stack until we find the parent level
+        while (stack.Count > 0 && stack.Peek().indentLevel >= node.indentLevel)
+        {
+            stack.Pop();
+        }
+
+        if (stack.Count == 0)
+        {
+            // Root level
+            roots.Add(node);
+        }
+        else
+        {
+            // Child of top of stack
+            var parent = stack.Peek();
+            node.parent = parent;
+            parent.children.Add(node);
+        }
+
+        // GameObjects can have children, so push to stack
+        if (node.type == NodeType.GameObject)
+        {
+            stack.Push(node);
+        }
+    }
+
+    return roots;
+}
+```
+
+}
+
+// ============================================================================
+// SCENE BUILDER - Creates actual Unity objects from parsed data
+// ============================================================================
+
+public class SceneBuilder
+{
+private int objectsCreated = 0;
+private int objectsReused = 0;
+private int componentsAdded = 0;
+private int errorsEncountered = 0;
+private List<string> errorMessages = new List<string>();
+
+```
+public void BuildScene(List<NotationParser.SceneNode> nodes)
+{
+    foreach (var node in nodes)
+    {
+        ProcessNode(node, null);
+    }
+}
+
+private GameObject ProcessNode(NotationParser.SceneNode node, GameObject parent)
+{
+    if (node.type == NotationParser.NodeType.GameObject)
+    {
+        GameObject go = FindOrCreateGameObject(node.name, parent);
+
+        // Process children (components and child GameObjects)
+        foreach (var child in node.children)
+        {
+            if (child.type == NotationParser.NodeType.GameObject)
+            {
+                ProcessNode(child, go);
+            }
+            else if (child.type == NotationParser.NodeType.Component)
+            {
+                AddComponentToGameObject(go, child.name);
+            }
+            else if (child.type == NotationParser.NodeType.Asset)
+            {
+                Debug.Log($"Asset reference noted on {go.name}: {child.name}");
+            }
+            else if (child.type == NotationParser.NodeType.Reference)
+            {
+                Debug.Log($"Reference noted on {go.name}: {child.name}");
+            }
+        }
+
+        return go;
+    }
+
+    return null;
+}
+
+private GameObject FindOrCreateGameObject(string name, GameObject parent)
+{
+    GameObject go = null;
+
+    // Try to find existing GameObject
+    if (parent == null)
+    {
+        // Search at root level
+        var rootObjects = UnityEngine.SceneManagement.SceneManager.GetActiveScene().GetRootGameObjects();
+        go = rootObjects.FirstOrDefault(obj => obj.name == name);
+    }
+    else
+    {
+        // Search in children
+        var transform = parent.transform.Find(name);
+        if (transform != null)
+        {
+            go = transform.gameObject;
+        }
+    }
+
+    if (go != null)
+    {
+        objectsReused++;
+        Debug.Log($"Reusing existing GameObject: {name}");
+    }
+    else
+    {
+        go = new GameObject(name);
+        if (parent != null)
+        {
+            go.transform.SetParent(parent.transform);
+        }
+        objectsCreated++;
+        Undo.RegisterCreatedObjectUndo(go, "Create GameObject from Notation");
+    }
+
+    return go;
+}
+
+private void AddComponentToGameObject(GameObject go, string componentName)
+{
+    // Check if component already exists
+    Type componentType = FindComponentType(componentName);
+
+    if (componentType == null)
+    {
+        string error = $"Component '{componentName}' not found in project or Unity assemblies. Skipping.";
+        errorMessages.Add(error);
+        errorsEncountered++;
+        Debug.LogWarning(error);
+        return;
+    }
+
+    // Check if already has this component
+    if (go.GetComponent(componentType) != null)
+    {
+        Debug.Log($"GameObject '{go.name}' already has {componentName}. Skipping.");
+        return;
+    }
+
+    try
+    {
+        Undo.AddComponent(go, componentType);
+        componentsAdded++;
+        Debug.Log($"Added {componentName} to {go.name}");
+    }
+    catch (Exception e)
+    {
+        string error = $"Failed to add {componentName} to {go.name}: {e.Message}";
+        errorMessages.Add(error);
+        errorsEncountered++;
+        Debug.LogError(error);
+    }
+}
+
+private Type FindComponentType(string name)
+{
+    // Clean up the name
+    name = name.Trim();
+
+    // Try Unity's built-in components first
+    Type type = Type.GetType($"UnityEngine.{name}, UnityEngine");
+    if (type != null && typeof(Component).IsAssignableFrom(type))
+    {
+        return type;
+    }
+
+    // Try UnityEngine.UI
+    type = Type.GetType($"UnityEngine.UI.{name}, UnityEngine.UI");
+    if (type != null && typeof(Component).IsAssignableFrom(type))
+    {
+        return type;
+    }
+
+    // Search all loaded assemblies for custom scripts
+    foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+    {
+        // Skip system assemblies for performance
+        if (assembly.FullName.StartsWith("System") || 
+            assembly.FullName.StartsWith("mscorlib") ||
+            assembly.FullName.StartsWith("netstandard"))
+            continue;
+
+        type = assembly.GetTypes()
+            .FirstOrDefault(t => t.Name == name && typeof(Component).IsAssignableFrom(t));
+
+        if (type != null)
+        {
+            return type;
+        }
+    }
+
+    return null;
+}
+
+public string GetStats()
+{
+    string stats = $"Objects Created: {objectsCreated}\n" +
+                  $"Objects Reused: {objectsReused}\n" +
+                  $"Components Added: {componentsAdded}";
+
+    if (errorsEncountered > 0)
+    {
+        stats += $"\n\nErrors: {errorsEncountered}";
+        stats += "\n" + string.Join("\n", errorMessages.Take(5));
+        if (errorMessages.Count > 5)
+        {
+            stats += $"\n... and {errorMessages.Count - 5} more (see Console)";
+        }
+    }
+
+    return stats;
+}
+```
+
+}
